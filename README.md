@@ -6,7 +6,7 @@ Terminal Pomodoro
 ## Group Members
 | Name | NetID |
 |---|---|
-| Nikhil Kulkarni | nhk5 |
+| Nikhil Kothavade | nhk5 |
 | Ammar Jiruwala | ammarj2 |
 | Tanay Desai | tndesai2 |
 

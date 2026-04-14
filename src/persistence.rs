@@ -1,10 +1,12 @@
-/// Stub — Tanay's module.
-/// Save/load tasks and session history will be implemented here.
+/// Persistence layer — Tanay's module.
+/// Actual serialization implemented at Checkpoint 2.
 
-pub fn save_state() {
-    todo!("Tanay: implement persistence")
+use crate::tasks::Task;
+
+pub fn save_state(_tasks: &[Task]) -> Result<(), String> {
+    todo!("Tanay: serialize tasks to JSON and write to disk")
 }
 
-pub fn load_state() {
-    todo!("Tanay: implement persistence")
+pub fn load_state() -> Result<Vec<Task>, String> {
+    todo!("Tanay: read JSON from disk and deserialize into Vec<Task>")
 }

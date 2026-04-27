@@ -10,11 +10,13 @@ use std::io;
 use std::time::Duration;
 
 use crossterm::{
-    event::{self, Event, KeyCode},
+    event::{self, Event, KeyCode, KeyEventKind},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::{Terminal, backend::CrosstermBackend};
+
+use app::AppState;
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -24,8 +26,6 @@ fn main() {
         return;
     }
 
-    // Put the terminal into raw mode and switch to the alternate screen
-    // (the alternate screen means the normal terminal contents are restored on exit).
     enable_raw_mode().expect("failed to enable raw mode");
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen).expect("failed to enter alternate screen");
@@ -33,21 +33,36 @@ fn main() {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend).expect("failed to create terminal");
 
-    // Draw loop: redraw on every keypress or every 100 ms, exit on 'q'.
-    loop {
-        terminal.draw(|f| ui::render(f)).expect("failed to draw");
+    let mut app = AppState::new();
 
-        // Poll for input with a short timeout so the loop stays responsive.
+    loop {
+        // Pull in any timer ticks that arrived since the last iteration.
+        app.process_timer_events();
+
+        terminal.draw(|f| ui::render(f, &app)).expect("failed to draw");
+
+        // Poll for input with a short timeout so the timer ticks drive redraws
+        // even when the user is not pressing keys.
         if event::poll(Duration::from_millis(100)).expect("failed to poll events") {
             if let Event::Key(key) = event::read().expect("failed to read event") {
-                if key.code == KeyCode::Char('q') {
-                    break;
+                // Guard against key-release events firing on some platforms.
+                if key.kind != KeyEventKind::Press {
+                    continue;
+                }
+
+                match key.code {
+                    KeyCode::Char('q') => {
+                        app.quit();
+                        break;
+                    }
+                    KeyCode::Char(' ') => app.toggle_pause(),
+                    KeyCode::Char('s') => app.skip(),
+                    _ => {}
                 }
             }
         }
     }
 
-    // Restore the terminal before exiting so the user's shell is not broken.
     disable_raw_mode().expect("failed to disable raw mode");
     execute!(terminal.backend_mut(), LeaveAlternateScreen)
         .expect("failed to leave alternate screen");

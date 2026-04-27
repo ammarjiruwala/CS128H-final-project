@@ -1,6 +1,3 @@
-/// Stub — Nikhil's module.
-/// ratatui rendering logic will be implemented here.
-
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Direction, Layout},
@@ -9,8 +6,12 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, Paragraph},
 };
 
-/// Renders the full static UI skeleton, called once per `terminal.draw()` invocation.
-pub fn render(f: &mut Frame) {
+use crate::app::AppState;
+use crate::tasks::TaskStatus;
+use crate::timer::{SessionState, SESSIONS_BEFORE_LONG_BREAK};
+
+/// Renders the full UI. Called every draw cycle with the current app state.
+pub fn render(f: &mut Frame, state: &AppState) {
     let area = f.area();
     let outer = Layout::default()
         .direction(Direction::Vertical)
@@ -36,43 +37,63 @@ pub fn render(f: &mut Frame) {
     let task_area  = middle[0];
     let stats_area = middle[1];
 
-    render_timer(f, timer_area);
-    render_tasks(f, task_area);
-    render_stats(f, stats_area);
-    render_help(f, help_area);
+    render_timer(f, timer_area, state);
+    render_tasks(f, task_area, state);
+    render_stats(f, stats_area, state);
+    render_help(f, help_area, state);
 }
 
-fn render_timer(f: &mut Frame, area: ratatui::layout::Rect) {
+fn render_timer(f: &mut Frame, area: ratatui::layout::Rect, state: &AppState) {
+    // Colour and label change depending on the current session type.
+    let (session_label, session_color) = match &state.session {
+        SessionState::Focus               => ("● FOCUS",       Color::Green),
+        SessionState::ShortBreak          => ("● SHORT BREAK", Color::Yellow),
+        SessionState::LongBreak           => ("● LONG BREAK",  Color::Cyan),
+        SessionState::Paused(inner) => match inner.as_ref() {
+            SessionState::Focus      => ("⏸ PAUSED (FOCUS)",       Color::DarkGray),
+            SessionState::ShortBreak => ("⏸ PAUSED (SHORT BREAK)", Color::DarkGray),
+            SessionState::LongBreak  => ("⏸ PAUSED (LONG BREAK)",  Color::DarkGray),
+            _                        => ("⏸ PAUSED",               Color::DarkGray),
+        },
+    };
+
     let block = Block::default()
-        .title(Line::from(vec![
-            Span::styled("Terminal Pomodoro ", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
-        ]))
+        .title(Line::from(Span::styled(
+            "Terminal Pomodoro ",
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        )))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::DarkGray));
 
-    let progress = Line::from(vec![
-        Span::styled("🍅 ", Style::default().fg(Color::Red)),
-        Span::styled("🍅 ", Style::default().fg(Color::Red)),
-        Span::styled("⬜ ", Style::default().fg(Color::DarkGray)),
-        Span::styled("⬜ ", Style::default().fg(Color::DarkGray)),
-        Span::raw(" Session 2 / 4"),
-    ]);
+    // Build the 🍅 / ⬜ progress row.
+    let total = SESSIONS_BEFORE_LONG_BREAK as usize;
+    let filled = state.focus_sessions_completed as usize;
+    let mut progress_spans: Vec<Span> = (0..total)
+        .map(|i| {
+            if i < filled {
+                Span::styled("🍅 ", Style::default().fg(Color::Red))
+            } else {
+                Span::styled("⬜ ", Style::default().fg(Color::DarkGray))
+            }
+        })
+        .collect();
+    progress_spans.push(Span::raw(format!(
+        " Session {} / {}",
+        filled, total
+    )));
+    let progress = Line::from(progress_spans);
 
     let timer_text = Text::from(vec![
         Line::from(""),
         Line::from(Span::styled(
-            "25:00",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
+            state.time_display(),
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
         ))
         .alignment(Alignment::Center),
         Line::from(""),
         Line::from(Span::styled(
-            "● FOCUS",
-            Style::default()
-                .fg(Color::Green)
-                .add_modifier(Modifier::BOLD),
+            session_label,
+            Style::default().fg(session_color).add_modifier(Modifier::BOLD),
         ))
         .alignment(Alignment::Center),
         Line::from(""),
@@ -86,7 +107,7 @@ fn render_timer(f: &mut Frame, area: ratatui::layout::Rect) {
     f.render_widget(paragraph, area);
 }
 
-fn render_tasks(f: &mut Frame, area: ratatui::layout::Rect) {
+fn render_tasks(f: &mut Frame, area: ratatui::layout::Rect, state: &AppState) {
     let block = Block::default()
         .title(Line::from(Span::styled(
             " Tasks ",
@@ -95,26 +116,34 @@ fn render_tasks(f: &mut Frame, area: ratatui::layout::Rect) {
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::DarkGray));
 
-    let items: Vec<ListItem> = vec![
-        ListItem::new(Line::from(vec![
-            Span::styled("[ ] ", Style::default().fg(Color::Yellow)),
-            Span::raw("Write project report"),
-        ])),
-        ListItem::new(Line::from(vec![
-            Span::styled("[ ] ", Style::default().fg(Color::Yellow)),
-            Span::raw("Review pull requests"),
-        ])),
-        ListItem::new(Line::from(vec![
-            Span::styled("[✓] ", Style::default().fg(Color::Green)),
-            Span::styled("Set up repo", Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM)),
-        ])),
-    ];
+    let items: Vec<ListItem> = if state.tasks.tasks().is_empty() {
+        vec![ListItem::new(Line::from(Span::styled(
+            "  No tasks yet — press <a> to add one",
+            Style::default().fg(Color::DarkGray),
+        )))]
+    } else {
+        state.tasks.tasks().iter().map(|task| {
+            match task.status {
+                TaskStatus::Done => ListItem::new(Line::from(vec![
+                    Span::styled("[✓] ", Style::default().fg(Color::Green)),
+                    Span::styled(
+                        task.title.clone(),
+                        Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM),
+                    ),
+                ])),
+                _ => ListItem::new(Line::from(vec![
+                    Span::styled("[ ] ", Style::default().fg(Color::Yellow)),
+                    Span::raw(task.title.clone()),
+                ])),
+            }
+        }).collect()
+    };
 
     let list = List::new(items).block(block);
     f.render_widget(list, area);
 }
 
-fn render_stats(f: &mut Frame, area: ratatui::layout::Rect) {
+fn render_stats(f: &mut Frame, area: ratatui::layout::Rect, state: &AppState) {
     let block = Block::default()
         .title(Line::from(Span::styled(
             " Stats ",
@@ -123,23 +152,34 @@ fn render_stats(f: &mut Frame, area: ratatui::layout::Rect) {
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::DarkGray));
 
+    let total_sessions = state.total_focus_sessions;
+    let focus_mins = total_sessions * 25;
+    let tasks_done = state.tasks.tasks().iter()
+        .filter(|t| t.status == TaskStatus::Done)
+        .count();
+
     let stats_text = Text::from(vec![
         Line::from(""),
         Line::from(vec![
             Span::styled("Sessions today : ", Style::default().fg(Color::DarkGray)),
-            Span::styled("2", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                total_sessions.to_string(),
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            ),
         ]),
         Line::from(vec![
             Span::styled("Focus time     : ", Style::default().fg(Color::DarkGray)),
-            Span::styled("50m", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                format!("{}m", focus_mins),
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            ),
         ]),
         Line::from(vec![
             Span::styled("Tasks done     : ", Style::default().fg(Color::DarkGray)),
-            Span::styled("1", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-        ]),
-        Line::from(vec![
-            Span::styled("Streak         : ", Style::default().fg(Color::DarkGray)),
-            Span::styled("3 days", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                tasks_done.to_string(),
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            ),
         ]),
     ]);
 
@@ -147,17 +187,20 @@ fn render_stats(f: &mut Frame, area: ratatui::layout::Rect) {
     f.render_widget(paragraph, area);
 }
 
-fn render_help(f: &mut Frame, area: ratatui::layout::Rect) {
+fn render_help(f: &mut Frame, area: ratatui::layout::Rect, state: &AppState) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::DarkGray));
 
-    let dim   = Style::default().fg(Color::DarkGray);
-    let key   = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
+    let dim = Style::default().fg(Color::DarkGray);
+    let key = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
+
+    // Change the pause label dynamically.
+    let pause_label = if state.session.is_paused() { " Resume  " } else { " Pause   " };
 
     let help_line = Line::from(vec![
         Span::styled("<Space>", key),
-        Span::styled(" Pause  ", dim),
+        Span::styled(pause_label, dim),
         Span::styled("<s>", key),
         Span::styled(" Skip  ", dim),
         Span::styled("<a>", key),

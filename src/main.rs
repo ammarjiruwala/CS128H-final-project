@@ -57,6 +57,7 @@ fn main() {
                     }
                     KeyCode::Char(' ') => app.toggle_pause(),
                     KeyCode::Char('s') => app.skip(),
+                    KeyCode::Char('u') => app.undo_last(),
                     _ => {}
                 }
             }

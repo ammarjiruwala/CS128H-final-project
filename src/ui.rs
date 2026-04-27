@@ -152,30 +152,54 @@ fn render_stats(f: &mut Frame, area: ratatui::layout::Rect, state: &AppState) {
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::DarkGray));
 
-    let total_sessions = state.total_focus_sessions;
-    let focus_mins = total_sessions * 25;
+    let focus_mins = state.total_focus_sessions * 25;
     let tasks_done = state.tasks.tasks().iter()
         .filter(|t| t.status == TaskStatus::Done)
         .count();
+    let completion_str = match state.completion_rate() {
+        Some(rate) => format!("{}%", rate),
+        None        => "—".to_string(),
+    };
 
     let stats_text = Text::from(vec![
         Line::from(""),
         Line::from(vec![
-            Span::styled("Sessions today : ", Style::default().fg(Color::DarkGray)),
+            Span::styled("Completed  : ", Style::default().fg(Color::DarkGray)),
             Span::styled(
-                total_sessions.to_string(),
+                state.total_focus_sessions.to_string(),
                 Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
             ),
         ]),
         Line::from(vec![
-            Span::styled("Focus time     : ", Style::default().fg(Color::DarkGray)),
+            Span::styled("Skipped    : ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                state.skipped_sessions.to_string(),
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("Completion : ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                completion_str,
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("Streak     : ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!("{} (best {})", state.current_streak, state.longest_streak),
+                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("Focus time : ", Style::default().fg(Color::DarkGray)),
             Span::styled(
                 format!("{}m", focus_mins),
                 Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
             ),
         ]),
         Line::from(vec![
-            Span::styled("Tasks done     : ", Style::default().fg(Color::DarkGray)),
+            Span::styled("Tasks done : ", Style::default().fg(Color::DarkGray)),
             Span::styled(
                 tasks_done.to_string(),
                 Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
@@ -203,6 +227,8 @@ fn render_help(f: &mut Frame, area: ratatui::layout::Rect, state: &AppState) {
         Span::styled(pause_label, dim),
         Span::styled("<s>", key),
         Span::styled(" Skip  ", dim),
+        Span::styled("<u>", key),
+        Span::styled(" Undo  ", dim),
         Span::styled("<a>", key),
         Span::styled(" Add Task  ", dim),
         Span::styled("<d>", key),

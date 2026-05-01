@@ -1,3 +1,5 @@
+use crate::persistence;
+use crate::stats::SessionRecord;
 use crate::tasks::TaskQueue;
 use crate::timer::{TimerCommand, TimerEvent, TimerHandle, SessionState, FOCUS_SECS};
 
@@ -22,6 +24,12 @@ pub struct AppState {
     pub tasks: TaskQueue,
     pub selected_task: Option<usize>,
     pub input_mode: InputMode,
+
+    /// Full session history for the current run (appended on each SessionChanged).
+    pub session_history: Vec<SessionRecord>,
+    /// Set to true when the user presses skip, cleared when SessionChanged arrives.
+    /// Used to distinguish a skip from a natural expiry when recording history.
+    skip_pending: bool,
 }
 
 impl AppState {
@@ -38,6 +46,8 @@ impl AppState {
             tasks: TaskQueue::new(),
             selected_task: None,
             input_mode: InputMode::Normal,
+            session_history: Vec::new(),
+            skip_pending: false,
         }
     }
 
@@ -54,24 +64,18 @@ impl AppState {
 
     pub fn select_next(&mut self) {
         let len = self.tasks.tasks().len();
-        if len == 0 {
-            self.selected_task = None;
-            return;
-        }
+        if len == 0 { self.selected_task = None; return; }
         self.selected_task = Some(match self.selected_task {
-            None => 0,
+            None    => 0,
             Some(i) => (i + 1).min(len - 1),
         });
     }
 
     pub fn select_prev(&mut self) {
         let len = self.tasks.tasks().len();
-        if len == 0 {
-            self.selected_task = None;
-            return;
-        }
+        if len == 0 { self.selected_task = None; return; }
         self.selected_task = Some(match self.selected_task {
-            None => 0,
+            None    => 0,
             Some(i) => i.saturating_sub(1),
         });
     }
@@ -91,11 +95,7 @@ impl AppState {
                 let id = task.id;
                 self.tasks.delete_task(id);
                 let len = self.tasks.tasks().len();
-                self.selected_task = if len == 0 {
-                    None
-                } else {
-                    Some(idx.min(len - 1))
-                };
+                self.selected_task = if len == 0 { None } else { Some(idx.min(len - 1)) };
             }
         }
     }
@@ -105,21 +105,17 @@ impl AppState {
     }
 
     pub fn input_push(&mut self, c: char) {
-        if let InputMode::AddingTask(ref mut s) = self.input_mode {
-            s.push(c);
-        }
+        if let InputMode::AddingTask(ref mut s) = self.input_mode { s.push(c); }
     }
 
     pub fn input_pop(&mut self) {
-        if let InputMode::AddingTask(ref mut s) = self.input_mode {
-            s.pop();
-        }
+        if let InputMode::AddingTask(ref mut s) = self.input_mode { s.pop(); }
     }
 
     pub fn confirm_add_task(&mut self) {
         let title = match &self.input_mode {
             InputMode::AddingTask(s) => s.trim().to_string(),
-            InputMode::Normal => String::new(),
+            InputMode::Normal        => String::new(),
         };
         if !title.is_empty() {
             self.tasks.add_task(&title);
@@ -132,18 +128,13 @@ impl AppState {
         self.input_mode = InputMode::Normal;
     }
 
-    /// Drain all pending timer events and update the local snapshot.
+    /// Drain all pending timer events, update the snapshot, and record sessions.
     pub fn process_timer_events(&mut self) {
         while let Ok(event) = self.timer.event_rx.try_recv() {
             match event {
                 TimerEvent::Tick {
-                    session,
-                    remaining_secs,
-                    focus_sessions_completed,
-                    total_focus_sessions,
-                    skipped_sessions,
-                    current_streak,
-                    longest_streak,
+                    session, remaining_secs, focus_sessions_completed,
+                    total_focus_sessions, skipped_sessions, current_streak, longest_streak,
                 } => {
                     self.session = session;
                     self.remaining_secs = remaining_secs;
@@ -153,8 +144,20 @@ impl AppState {
                     self.current_streak = current_streak;
                     self.longest_streak = longest_streak;
                 }
-                TimerEvent::SessionChanged(session) => {
-                    self.session = session;
+                TimerEvent::SessionChanged(new_session) => {
+                    // Record the session that just ended before overwriting self.session.
+                    let was_skip = self.skip_pending;
+                    self.skip_pending = false;
+                    let session_type = match &self.session {
+                        SessionState::Focus      => Some("Focus"),
+                        SessionState::ShortBreak => Some("ShortBreak"),
+                        SessionState::LongBreak  => Some("LongBreak"),
+                        SessionState::Paused(_)  => None,
+                    };
+                    if let Some(st) = session_type {
+                        self.session_history.push(SessionRecord::new(st, !was_skip));
+                    }
+                    self.session = new_session;
                 }
             }
         }
@@ -162,16 +165,13 @@ impl AppState {
 
     /// Toggle between paused and running.
     pub fn toggle_pause(&self) {
-        let cmd = if self.session.is_paused() {
-            TimerCommand::Resume
-        } else {
-            TimerCommand::Pause
-        };
+        let cmd = if self.session.is_paused() { TimerCommand::Resume } else { TimerCommand::Pause };
         let _ = self.timer.cmd_tx.send(cmd);
     }
 
     /// Skip the current session (does not count toward completed stats).
-    pub fn skip(&self) {
+    pub fn skip(&mut self) {
+        self.skip_pending = true;
         let _ = self.timer.cmd_tx.send(TimerCommand::Skip);
     }
 
@@ -185,6 +185,13 @@ impl AppState {
         let _ = self.timer.cmd_tx.send(TimerCommand::Quit);
     }
 
+    /// Save tasks and session history to disk. Called on clean exit.
+    pub fn save(&self) -> Result<(), String> {
+        persistence::save_tasks(self.tasks.tasks())?;
+        persistence::save_history(&self.session_history)?;
+        Ok(())
+    }
+
     /// Format remaining_secs as "MM:SS".
     pub fn time_display(&self) -> String {
         let mins = self.remaining_secs / 60;
@@ -195,10 +202,6 @@ impl AppState {
     /// Completion rate as a rounded percentage, or None if no sessions attempted yet.
     pub fn completion_rate(&self) -> Option<u32> {
         let total = self.total_focus_sessions + self.skipped_sessions;
-        if total == 0 {
-            None
-        } else {
-            Some(self.total_focus_sessions * 100 / total)
-        }
+        if total == 0 { None } else { Some(self.total_focus_sessions * 100 / total) }
     }
 }

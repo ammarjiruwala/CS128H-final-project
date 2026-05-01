@@ -1,13 +1,15 @@
 /// Task struct and queue operations — Tanay's module.
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TaskStatus {
     Todo,
     InProgress,
     Done,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Task {
     pub id: u32,
     pub title: String,
@@ -26,6 +28,12 @@ impl TaskQueue {
             tasks: Vec::new(),
             next_id: 1,
         }
+    }
+
+    /// Reconstruct a queue from persisted tasks, preserving IDs.
+    pub fn from_tasks(tasks: Vec<Task>) -> Self {
+        let next_id = tasks.iter().map(|t| t.id).max().unwrap_or(0) + 1;
+        TaskQueue { tasks, next_id }
     }
 
     pub fn add_task(&mut self, title: &str) {

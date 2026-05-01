@@ -5,6 +5,7 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{Block, Borders, List, ListItem, Paragraph},
 };
+use crate::app::InputMode;
 
 use crate::app::AppState;
 use crate::tasks::TaskStatus;
@@ -108,6 +109,17 @@ fn render_timer(f: &mut Frame, area: ratatui::layout::Rect, state: &AppState) {
 }
 
 fn render_tasks(f: &mut Frame, area: ratatui::layout::Rect, state: &AppState) {
+    // Reserve 3 rows at the bottom for the input box when adding a task.
+    let (list_area, input_area) = if state.is_adding() {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(0), Constraint::Length(3)])
+            .split(area);
+        (chunks[0], Some(chunks[1]))
+    } else {
+        (area, None)
+    };
+
     let block = Block::default()
         .title(Line::from(Span::styled(
             " Tasks ",
@@ -122,25 +134,48 @@ fn render_tasks(f: &mut Frame, area: ratatui::layout::Rect, state: &AppState) {
             Style::default().fg(Color::DarkGray),
         )))]
     } else {
-        state.tasks.tasks().iter().map(|task| {
+        state.tasks.tasks().iter().enumerate().map(|(i, task)| {
+            let selected = state.selected_task == Some(i);
+            let row_style = if selected {
+                Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            let cursor = if selected { "▶" } else { " " };
             match task.status {
                 TaskStatus::Done => ListItem::new(Line::from(vec![
-                    Span::styled("[✓] ", Style::default().fg(Color::Green)),
+                    Span::styled(format!("{} [✓] ", cursor), row_style.fg(Color::Green)),
                     Span::styled(
                         task.title.clone(),
-                        Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM),
+                        row_style.fg(Color::DarkGray).add_modifier(Modifier::DIM),
                     ),
                 ])),
                 _ => ListItem::new(Line::from(vec![
-                    Span::styled("[ ] ", Style::default().fg(Color::Yellow)),
-                    Span::raw(task.title.clone()),
+                    Span::styled(format!("{} [ ] ", cursor), row_style.fg(Color::Yellow)),
+                    Span::styled(task.title.clone(), row_style),
                 ])),
             }
         }).collect()
     };
 
     let list = List::new(items).block(block);
-    f.render_widget(list, area);
+    f.render_widget(list, list_area);
+
+    // Input box shown only when the user is typing a new task name.
+    if let Some(area) = input_area {
+        let input_block = Block::default()
+            .title(Line::from(Span::styled(
+                " New Task (Enter to confirm, Esc to cancel) ",
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            )))
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Yellow));
+        let display = format!("{}_", state.input_buf());
+        let input_widget = Paragraph::new(display)
+            .block(input_block)
+            .style(Style::default().fg(Color::White));
+        f.render_widget(input_widget, area);
+    }
 }
 
 fn render_stats(f: &mut Frame, area: ratatui::layout::Rect, state: &AppState) {
@@ -222,20 +257,33 @@ fn render_help(f: &mut Frame, area: ratatui::layout::Rect, state: &AppState) {
     // Change the pause label dynamically.
     let pause_label = if state.session.is_paused() { " Resume  " } else { " Pause   " };
 
-    let help_line = Line::from(vec![
-        Span::styled("<Space>", key),
-        Span::styled(pause_label, dim),
-        Span::styled("<s>", key),
-        Span::styled(" Skip  ", dim),
-        Span::styled("<u>", key),
-        Span::styled(" Undo  ", dim),
-        Span::styled("<a>", key),
-        Span::styled(" Add Task  ", dim),
-        Span::styled("<d>", key),
-        Span::styled(" Delete  ", dim),
-        Span::styled("<q>", key),
-        Span::styled(" Quit", dim),
-    ]);
+    let help_line = if matches!(state.input_mode, InputMode::AddingTask(_)) {
+        Line::from(vec![
+            Span::styled("<Enter>", key),
+            Span::styled(" Confirm  ", dim),
+            Span::styled("<Esc>", key),
+            Span::styled(" Cancel", dim),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled("<Space>", key),
+            Span::styled(pause_label, dim),
+            Span::styled("<s>", key),
+            Span::styled(" Skip  ", dim),
+            Span::styled("<u>", key),
+            Span::styled(" Undo  ", dim),
+            Span::styled("↑↓", key),
+            Span::styled(" Select  ", dim),
+            Span::styled("<Enter>", key),
+            Span::styled(" Complete  ", dim),
+            Span::styled("<a>", key),
+            Span::styled(" Add  ", dim),
+            Span::styled("<d>", key),
+            Span::styled(" Delete  ", dim),
+            Span::styled("<q>", key),
+            Span::styled(" Quit", dim),
+        ])
+    };
 
     let paragraph = Paragraph::new(Text::from(help_line))
         .block(block)

@@ -1,6 +1,11 @@
 use crate::tasks::TaskQueue;
 use crate::timer::{TimerCommand, TimerEvent, TimerHandle, SessionState, FOCUS_SECS};
 
+pub enum InputMode {
+    Normal,
+    AddingTask(String),
+}
+
 /// Top-level application state shared between the event loop and the UI renderer.
 pub struct AppState {
     pub timer: TimerHandle,
@@ -15,6 +20,8 @@ pub struct AppState {
     pub longest_streak: u32,
 
     pub tasks: TaskQueue,
+    pub selected_task: Option<usize>,
+    pub input_mode: InputMode,
 }
 
 impl AppState {
@@ -29,7 +36,100 @@ impl AppState {
             current_streak: 0,
             longest_streak: 0,
             tasks: TaskQueue::new(),
+            selected_task: None,
+            input_mode: InputMode::Normal,
         }
+    }
+
+    pub fn is_adding(&self) -> bool {
+        matches!(self.input_mode, InputMode::AddingTask(_))
+    }
+
+    pub fn input_buf(&self) -> &str {
+        match &self.input_mode {
+            InputMode::AddingTask(s) => s,
+            InputMode::Normal => "",
+        }
+    }
+
+    pub fn select_next(&mut self) {
+        let len = self.tasks.tasks().len();
+        if len == 0 {
+            self.selected_task = None;
+            return;
+        }
+        self.selected_task = Some(match self.selected_task {
+            None => 0,
+            Some(i) => (i + 1).min(len - 1),
+        });
+    }
+
+    pub fn select_prev(&mut self) {
+        let len = self.tasks.tasks().len();
+        if len == 0 {
+            self.selected_task = None;
+            return;
+        }
+        self.selected_task = Some(match self.selected_task {
+            None => 0,
+            Some(i) => i.saturating_sub(1),
+        });
+    }
+
+    pub fn complete_selected(&mut self) {
+        if let Some(idx) = self.selected_task {
+            if let Some(task) = self.tasks.tasks().get(idx) {
+                let id = task.id;
+                self.tasks.complete_task(id);
+            }
+        }
+    }
+
+    pub fn delete_selected(&mut self) {
+        if let Some(idx) = self.selected_task {
+            if let Some(task) = self.tasks.tasks().get(idx) {
+                let id = task.id;
+                self.tasks.delete_task(id);
+                let len = self.tasks.tasks().len();
+                self.selected_task = if len == 0 {
+                    None
+                } else {
+                    Some(idx.min(len - 1))
+                };
+            }
+        }
+    }
+
+    pub fn start_add_task(&mut self) {
+        self.input_mode = InputMode::AddingTask(String::new());
+    }
+
+    pub fn input_push(&mut self, c: char) {
+        if let InputMode::AddingTask(ref mut s) = self.input_mode {
+            s.push(c);
+        }
+    }
+
+    pub fn input_pop(&mut self) {
+        if let InputMode::AddingTask(ref mut s) = self.input_mode {
+            s.pop();
+        }
+    }
+
+    pub fn confirm_add_task(&mut self) {
+        let title = match &self.input_mode {
+            InputMode::AddingTask(s) => s.trim().to_string(),
+            InputMode::Normal => String::new(),
+        };
+        if !title.is_empty() {
+            self.tasks.add_task(&title);
+            self.selected_task = Some(self.tasks.tasks().len() - 1);
+        }
+        self.input_mode = InputMode::Normal;
+    }
+
+    pub fn cancel_add_task(&mut self) {
+        self.input_mode = InputMode::Normal;
     }
 
     /// Drain all pending timer events and update the local snapshot.

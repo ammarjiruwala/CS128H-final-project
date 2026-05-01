@@ -51,13 +51,36 @@ fn main() {
                 }
 
                 match key.code {
-                    KeyCode::Char('q') => {
-                        app.quit();
-                        break;
+                    KeyCode::Esc => app.cancel_add_task(),
+                    KeyCode::Up => app.select_prev(),
+                    KeyCode::Down => app.select_next(),
+                    KeyCode::Enter => {
+                        if app.is_adding() {
+                            app.confirm_add_task();
+                        } else {
+                            app.complete_selected();
+                        }
                     }
-                    KeyCode::Char(' ') => app.toggle_pause(),
-                    KeyCode::Char('s') => app.skip(),
-                    KeyCode::Char('u') => app.undo_last(),
+                    KeyCode::Backspace => {
+                        if app.is_adding() {
+                            app.input_pop();
+                        }
+                    }
+                    KeyCode::Char(c) => {
+                        if app.is_adding() {
+                            app.input_push(c);
+                        } else {
+                            match c {
+                                'q' => { app.quit(); break; }
+                                ' ' => app.toggle_pause(),
+                                's' => app.skip(),
+                                'u' => app.undo_last(),
+                                'a' => app.start_add_task(),
+                                'd' => app.delete_selected(),
+                                _ => {}
+                            }
+                        }
+                    }
                     _ => {}
                 }
             }

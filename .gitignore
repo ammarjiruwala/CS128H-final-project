@@ -1,2 +1,4 @@
 target
 Cargo.lock
+pomodoro_tasks.json
+pomodoro_history.json

@@ -62,23 +62,27 @@ fn main() {
                 }
 
                 match key.code {
-                    KeyCode::Esc => app.cancel_add_task(),
-                    KeyCode::Up => app.select_prev(),
-                    KeyCode::Down => app.select_next(),
+                    KeyCode::Esc => app.cancel_input(),
+                    KeyCode::Up => {
+                        if !app.is_typing() { app.select_prev(); }
+                    }
+                    KeyCode::Down => {
+                        if !app.is_typing() { app.select_next(); }
+                    }
                     KeyCode::Enter => {
                         if app.is_adding() {
                             app.confirm_add_task();
+                        } else if app.is_editing() {
+                            app.confirm_edit_task();
                         } else {
-                            app.complete_selected();
+                            app.toggle_selected();
                         }
                     }
                     KeyCode::Backspace => {
-                        if app.is_adding() {
-                            app.input_pop();
-                        }
+                        if app.is_typing() { app.input_pop(); }
                     }
                     KeyCode::Char(c) => {
-                        if app.is_adding() {
+                        if app.is_typing() {
                             app.input_push(c);
                         } else {
                             match c {
@@ -87,7 +91,10 @@ fn main() {
                                 's' => app.skip(),
                                 'u' => app.undo_last(),
                                 'a' => app.start_add_task(),
+                                'e' => app.start_edit_task(),
                                 'd' => app.delete_selected(),
+                                '[' => app.scroll_stats_up(),
+                                ']' => app.scroll_stats_down(),
                                 _ => {}
                             }
                         }

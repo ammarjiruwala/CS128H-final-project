@@ -9,14 +9,19 @@ pub struct SessionRecord {
     /// true = ran to zero naturally; false = user pressed skip
     pub completed: bool,
     pub timestamp: String,
+    /// Actual seconds spent in this session (partial for skipped Focus sessions).
+    /// Defaults to 0 for records written before this field was added.
+    #[serde(default)]
+    pub focus_secs: u64,
 }
 
 impl SessionRecord {
-    pub fn new(session_type: &str, completed: bool) -> Self {
+    pub fn new(session_type: &str, completed: bool, focus_secs: u64) -> Self {
         SessionRecord {
             session_type: session_type.to_string(),
             completed,
             timestamp: Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+            focus_secs,
         }
     }
 }
@@ -37,13 +42,13 @@ pub fn print_stats() {
         .filter(|r| r.session_type == "Focus")
         .collect();
 
-    let completed  = focus.iter().filter(|r| r.completed).count() as u32;
-    let skipped    = focus.iter().filter(|r| !r.completed).count() as u32;
-    let total      = completed + skipped;
-    let rate       = if total > 0 { completed * 100 / total } else { 0 };
-    let focus_mins = completed * 25;
+    let completed        = focus.iter().filter(|r| r.completed).count() as u32;
+    let skipped          = focus.iter().filter(|r| !r.completed).count() as u32;
+    let total            = completed + skipped;
+    let rate             = if total > 0 { completed * 100 / total } else { 0 };
+    let total_focus_secs: u64 = focus.iter().map(|r| r.focus_secs).sum();
+    let focus_mins       = total_focus_secs / 60;
 
-    // Longest streak of consecutive completed focus sessions.
     let mut longest: u32 = 0;
     let mut cur: u32 = 0;
     for r in &focus {
@@ -75,8 +80,12 @@ pub fn print_stats() {
                 "LongBreak"  => "Long Break ",
                 other        => other,
             };
-            let note = if !r.completed { "  ← skipped" } else { "" };
-            println!("    [{}] {}  {}{}", icon, label, r.timestamp, note);
+            let time_note = if r.session_type == "Focus" && !r.completed && r.focus_secs > 0 {
+                format!("  ({}m elapsed)", r.focus_secs / 60)
+            } else {
+                String::new()
+            };
+            println!("    [{}] {}  {}{}", icon, label, r.timestamp, time_note);
         }
         println!();
     }

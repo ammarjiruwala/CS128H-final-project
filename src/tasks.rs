@@ -59,6 +59,23 @@ impl TaskQueue {
     pub fn tasks(&self) -> &[Task] {
         &self.tasks
     }
+
+    /// Toggle a task between Todo and Done. Pressing Enter again undoes a completion.
+    pub fn toggle_task(&mut self, id: u32) {
+        if let Some(task) = self.tasks.iter_mut().find(|t| t.id == id) {
+            task.status = match task.status {
+                TaskStatus::Done => TaskStatus::Todo,
+                _                => TaskStatus::Done,
+            };
+        }
+    }
+
+    /// Rename a task by ID.
+    pub fn rename_task(&mut self, id: u32, new_title: &str) {
+        if let Some(task) = self.tasks.iter_mut().find(|t| t.id == id) {
+            task.title = new_title.trim().to_string();
+        }
+    }
 }
 
 #[cfg(test)]

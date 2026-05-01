@@ -73,6 +73,8 @@ pub struct TimerState {
     pub current_streak: u32,
     /// Highest streak reached this run.
     pub longest_streak: u32,
+    /// Total seconds actually spent in Focus, including partial skipped sessions.
+    pub total_focus_secs: u64,
 }
 
 impl TimerState {
@@ -85,6 +87,7 @@ impl TimerState {
             skipped_sessions: 0,
             current_streak: 0,
             longest_streak: 0,
+            total_focus_secs: 0,
         }
     }
 
@@ -102,6 +105,13 @@ impl TimerState {
             SessionState::Focus => {
                 // Always advance the cycle counter (needed to trigger long break).
                 self.focus_sessions_completed += 1;
+
+                // Track actual seconds spent: full duration if completed, elapsed if skipped.
+                self.total_focus_secs += if completed {
+                    FOCUS_SECS
+                } else {
+                    FOCUS_SECS.saturating_sub(self.remaining_secs)
+                };
 
                 if completed {
                     self.total_focus_sessions += 1;
@@ -197,6 +207,7 @@ pub enum TimerEvent {
         skipped_sessions: u32,
         current_streak: u32,
         longest_streak: u32,
+        total_focus_secs: u64,
     },
     /// The active session changed (natural expiry or skip).
     SessionChanged(SessionState),
@@ -216,6 +227,7 @@ pub struct TimerHandle {
 
 impl TimerHandle {
     /// Spawn the background timer thread and return a handle to it.
+    /// The timer starts paused so the user can add tasks before the countdown begins.
     pub fn start() -> Self {
         let (cmd_tx, cmd_rx) = mpsc::channel::<TimerCommand>();
         let (event_tx, event_rx) = mpsc::channel::<TimerEvent>();
@@ -227,7 +239,9 @@ impl TimerHandle {
             timer_loop(state_clone, cmd_rx, event_tx);
         });
 
-        TimerHandle { cmd_tx, event_rx, state }
+        let handle = TimerHandle { cmd_tx, event_rx, state };
+        let _ = handle.cmd_tx.send(TimerCommand::Pause);
+        handle
     }
 }
 
@@ -309,6 +323,7 @@ fn timer_loop(
                 skipped_sessions: s.skipped_sessions,
                 current_streak: s.current_streak,
                 longest_streak: s.longest_streak,
+                total_focus_secs: s.total_focus_secs,
             }
         };
         if event_tx.send(snapshot).is_err() {

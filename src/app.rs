@@ -6,6 +6,8 @@ use crate::timer::{TimerCommand, TimerEvent, TimerHandle, SessionState, FOCUS_SE
 pub enum InputMode {
     Normal,
     AddingTask(String),
+    /// Editing the task at `idx`; `buffer` holds the current typed text.
+    EditingTask { idx: usize, buffer: String },
 }
 
 /// Top-level application state shared between the event loop and the UI renderer.
@@ -20,15 +22,17 @@ pub struct AppState {
     pub skipped_sessions: u32,
     pub current_streak: u32,
     pub longest_streak: u32,
+    /// Actual seconds spent in Focus across all sessions (including partial skips).
+    pub total_focus_secs: u64,
 
     pub tasks: TaskQueue,
     pub selected_task: Option<usize>,
     pub input_mode: InputMode,
 
-    /// Full session history for the current run (appended on each SessionChanged).
+    /// How many rows the stats panel has been scrolled down.
+    pub stats_scroll: u16,
+
     pub session_history: Vec<SessionRecord>,
-    /// Set to true when the user presses skip, cleared when SessionChanged arrives.
-    /// Used to distinguish a skip from a natural expiry when recording history.
     skip_pending: bool,
 }
 
@@ -36,31 +40,67 @@ impl AppState {
     pub fn new() -> Self {
         AppState {
             timer: TimerHandle::start(),
-            session: SessionState::Focus,
+            // TimerHandle::start() sends an immediate Pause, so we mirror that here.
+            session: SessionState::Paused(Box::new(SessionState::Focus)),
             remaining_secs: FOCUS_SECS,
             focus_sessions_completed: 0,
             total_focus_sessions: 0,
             skipped_sessions: 0,
             current_streak: 0,
             longest_streak: 0,
+            total_focus_secs: 0,
             tasks: TaskQueue::new(),
             selected_task: None,
             input_mode: InputMode::Normal,
+            stats_scroll: 0,
             session_history: Vec::new(),
             skip_pending: false,
         }
     }
 
+    // -----------------------------------------------------------------------
+    // Input mode helpers
+    // -----------------------------------------------------------------------
+
     pub fn is_adding(&self) -> bool {
         matches!(self.input_mode, InputMode::AddingTask(_))
     }
 
+    pub fn is_editing(&self) -> bool {
+        matches!(self.input_mode, InputMode::EditingTask { .. })
+    }
+
+    pub fn is_typing(&self) -> bool {
+        self.is_adding() || self.is_editing()
+    }
+
     pub fn input_buf(&self) -> &str {
         match &self.input_mode {
-            InputMode::AddingTask(s) => s,
-            InputMode::Normal => "",
+            InputMode::AddingTask(s)              => s,
+            InputMode::EditingTask { buffer, .. } => buffer,
+            InputMode::Normal                     => "",
         }
     }
+
+    pub fn input_push(&mut self, c: char) {
+        match &mut self.input_mode {
+            InputMode::AddingTask(s)              => s.push(c),
+            InputMode::EditingTask { buffer, .. } => buffer.push(c),
+            InputMode::Normal                     => {}
+        }
+    }
+
+    pub fn input_pop(&mut self) {
+        match &mut self.input_mode {
+            InputMode::AddingTask(s)              => { s.pop(); }
+            InputMode::EditingTask { buffer, .. } => { buffer.pop(); }
+            InputMode::Normal                     => {}
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Task navigation
+    // -----------------------------------------------------------------------
 
     pub fn select_next(&mut self) {
         let len = self.tasks.tasks().len();
@@ -80,11 +120,16 @@ impl AppState {
         });
     }
 
-    pub fn complete_selected(&mut self) {
+    // -----------------------------------------------------------------------
+    // Task actions
+    // -----------------------------------------------------------------------
+
+    /// Toggle the selected task between Todo and Done (pressing Enter twice undoes a completion).
+    pub fn toggle_selected(&mut self) {
         if let Some(idx) = self.selected_task {
             if let Some(task) = self.tasks.tasks().get(idx) {
                 let id = task.id;
-                self.tasks.complete_task(id);
+                self.tasks.toggle_task(id);
             }
         }
     }
@@ -104,18 +149,10 @@ impl AppState {
         self.input_mode = InputMode::AddingTask(String::new());
     }
 
-    pub fn input_push(&mut self, c: char) {
-        if let InputMode::AddingTask(ref mut s) = self.input_mode { s.push(c); }
-    }
-
-    pub fn input_pop(&mut self) {
-        if let InputMode::AddingTask(ref mut s) = self.input_mode { s.pop(); }
-    }
-
     pub fn confirm_add_task(&mut self) {
         let title = match &self.input_mode {
             InputMode::AddingTask(s) => s.trim().to_string(),
-            InputMode::Normal        => String::new(),
+            _                        => String::new(),
         };
         if !title.is_empty() {
             self.tasks.add_task(&title);
@@ -124,9 +161,49 @@ impl AppState {
         self.input_mode = InputMode::Normal;
     }
 
-    pub fn cancel_add_task(&mut self) {
+    /// Begin editing the currently selected task name, pre-filling the buffer.
+    pub fn start_edit_task(&mut self) {
+        if let Some(idx) = self.selected_task {
+            if let Some(task) = self.tasks.tasks().get(idx) {
+                let current = task.title.clone();
+                self.input_mode = InputMode::EditingTask { idx, buffer: current };
+            }
+        }
+    }
+
+    pub fn confirm_edit_task(&mut self) {
+        if let InputMode::EditingTask { idx, buffer } = &self.input_mode {
+            let idx = *idx;
+            let new_title = buffer.trim().to_string();
+            if !new_title.is_empty() {
+                if let Some(task) = self.tasks.tasks().get(idx) {
+                    let id = task.id;
+                    self.tasks.rename_task(id, &new_title);
+                }
+            }
+        }
         self.input_mode = InputMode::Normal;
     }
+
+    pub fn cancel_input(&mut self) {
+        self.input_mode = InputMode::Normal;
+    }
+
+    // -----------------------------------------------------------------------
+    // Stats scroll
+    // -----------------------------------------------------------------------
+
+    pub fn scroll_stats_down(&mut self) {
+        self.stats_scroll = self.stats_scroll.saturating_add(1);
+    }
+
+    pub fn scroll_stats_up(&mut self) {
+        self.stats_scroll = self.stats_scroll.saturating_sub(1);
+    }
+
+    // -----------------------------------------------------------------------
+    // Timer events
+    // -----------------------------------------------------------------------
 
     /// Drain all pending timer events, update the snapshot, and record sessions.
     pub fn process_timer_events(&mut self) {
@@ -134,7 +211,8 @@ impl AppState {
             match event {
                 TimerEvent::Tick {
                     session, remaining_secs, focus_sessions_completed,
-                    total_focus_sessions, skipped_sessions, current_streak, longest_streak,
+                    total_focus_sessions, skipped_sessions, current_streak,
+                    longest_streak, total_focus_secs,
                 } => {
                     self.session = session;
                     self.remaining_secs = remaining_secs;
@@ -143,19 +221,30 @@ impl AppState {
                     self.skipped_sessions = skipped_sessions;
                     self.current_streak = current_streak;
                     self.longest_streak = longest_streak;
+                    self.total_focus_secs = total_focus_secs;
                 }
                 TimerEvent::SessionChanged(new_session) => {
-                    // Record the session that just ended before overwriting self.session.
                     let was_skip = self.skip_pending;
                     self.skip_pending = false;
-                    let session_type = match &self.session {
-                        SessionState::Focus      => Some("Focus"),
-                        SessionState::ShortBreak => Some("ShortBreak"),
-                        SessionState::LongBreak  => Some("LongBreak"),
-                        SessionState::Paused(_)  => None,
+
+                    // Record the session that just ended.
+                    let (session_type, elapsed_secs) = match &self.session {
+                        SessionState::Focus => {
+                            let elapsed = if was_skip {
+                                FOCUS_SECS.saturating_sub(self.remaining_secs)
+                            } else {
+                                FOCUS_SECS
+                            };
+                            (Some("Focus"), elapsed)
+                        }
+                        SessionState::ShortBreak => (Some("ShortBreak"), 0),
+                        SessionState::LongBreak  => (Some("LongBreak"), 0),
+                        SessionState::Paused(_)  => (None, 0),
                     };
                     if let Some(st) = session_type {
-                        self.session_history.push(SessionRecord::new(st, !was_skip));
+                        self.session_history.push(
+                            SessionRecord::new(st, !was_skip, elapsed_secs)
+                        );
                     }
                     self.session = new_session;
                 }
@@ -163,43 +252,42 @@ impl AppState {
         }
     }
 
-    /// Toggle between paused and running.
+    // -----------------------------------------------------------------------
+    // Timer commands
+    // -----------------------------------------------------------------------
+
     pub fn toggle_pause(&self) {
         let cmd = if self.session.is_paused() { TimerCommand::Resume } else { TimerCommand::Pause };
         let _ = self.timer.cmd_tx.send(cmd);
     }
 
-    /// Skip the current session (does not count toward completed stats).
     pub fn skip(&mut self) {
         self.skip_pending = true;
         let _ = self.timer.cmd_tx.send(TimerCommand::Skip);
     }
 
-    /// Remove the last completed session from stats without changing the current session.
     pub fn undo_last(&self) {
         let _ = self.timer.cmd_tx.send(TimerCommand::UndoLast);
     }
 
-    /// Signal the timer thread to exit.
     pub fn quit(&self) {
         let _ = self.timer.cmd_tx.send(TimerCommand::Quit);
     }
 
-    /// Save tasks and session history to disk. Called on clean exit.
+    // -----------------------------------------------------------------------
+    // Helpers
+    // -----------------------------------------------------------------------
+
     pub fn save(&self) -> Result<(), String> {
         persistence::save_tasks(self.tasks.tasks())?;
         persistence::save_history(&self.session_history)?;
         Ok(())
     }
 
-    /// Format remaining_secs as "MM:SS".
     pub fn time_display(&self) -> String {
-        let mins = self.remaining_secs / 60;
-        let secs = self.remaining_secs % 60;
-        format!("{:02}:{:02}", mins, secs)
+        format!("{:02}:{:02}", self.remaining_secs / 60, self.remaining_secs % 60)
     }
 
-    /// Completion rate as a rounded percentage, or None if no sessions attempted yet.
     pub fn completion_rate(&self) -> Option<u32> {
         let total = self.total_focus_sessions + self.skipped_sessions;
         if total == 0 { None } else { Some(self.total_focus_sessions * 100 / total) }

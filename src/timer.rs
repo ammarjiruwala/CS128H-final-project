@@ -38,7 +38,6 @@ pub enum SessionState {
 
 impl SessionState {
     /// Returns the total duration (in seconds) for this state.
-    /// Panics if called on `Paused` — query the inner state instead.
     pub fn duration_secs(&self) -> u64 {
         match self {
             SessionState::Focus => FOCUS_SECS,
@@ -55,7 +54,7 @@ impl SessionState {
 }
 
 // ---------------------------------------------------------------------------
-// Shared timer state (timer thread + UI thread both read this)
+// Shared timer state
 // ---------------------------------------------------------------------------
 
 /// All mutable timer data protected by a single `Mutex`.
@@ -64,10 +63,16 @@ pub struct TimerState {
     pub session: SessionState,
     /// Seconds remaining in the current session.
     pub remaining_secs: u64,
-    /// How many Focus sessions have been completed in the current cycle.
+    /// How many Focus sessions completed in the current cycle (resets at long break).
     pub focus_sessions_completed: u32,
-    /// Total Focus sessions completed across all cycles (lifetime counter).
+    /// Focus sessions that ran to zero naturally (excludes skipped).
     pub total_focus_sessions: u32,
+    /// Focus sessions the user skipped before they expired.
+    pub skipped_sessions: u32,
+    /// Consecutive naturally-completed Focus sessions without a skip.
+    pub current_streak: u32,
+    /// Highest streak reached this run.
+    pub longest_streak: u32,
 }
 
 impl TimerState {
@@ -77,6 +82,9 @@ impl TimerState {
             remaining_secs: FOCUS_SECS,
             focus_sessions_completed: 0,
             total_focus_sessions: 0,
+            skipped_sessions: 0,
+            current_streak: 0,
+            longest_streak: 0,
         }
     }
 
@@ -84,13 +92,28 @@ impl TimerState {
     // Transition helpers
     // -----------------------------------------------------------------------
 
-    /// Advance to the next session after the current one expires.
-    /// Updates counters and resets `remaining_secs`.
-    pub fn advance(&mut self) {
+    /// Advance to the next session.
+    ///
+    /// `completed` should be `true` when the timer hit zero naturally, and
+    /// `false` when the user pressed skip. Only natural completions count
+    /// toward `total_focus_sessions` and the streak.
+    pub fn advance(&mut self, completed: bool) {
         match &self.session {
             SessionState::Focus => {
+                // Always advance the cycle counter (needed to trigger long break).
                 self.focus_sessions_completed += 1;
-                self.total_focus_sessions += 1;
+
+                if completed {
+                    self.total_focus_sessions += 1;
+                    self.current_streak += 1;
+                    if self.current_streak > self.longest_streak {
+                        self.longest_streak = self.current_streak;
+                    }
+                } else {
+                    self.skipped_sessions += 1;
+                    self.current_streak = 0;
+                }
+
                 if self.focus_sessions_completed >= SESSIONS_BEFORE_LONG_BREAK {
                     self.focus_sessions_completed = 0;
                     self.session = SessionState::LongBreak;
@@ -105,9 +128,8 @@ impl TimerState {
                 self.remaining_secs = FOCUS_SECS;
             }
             SessionState::Paused(_) => {
-                // Advance from inside a paused state: resume then advance.
                 self.resume();
-                self.advance();
+                self.advance(completed);
             }
         }
     }
@@ -128,13 +150,23 @@ impl TimerState {
         }
     }
 
-    /// Skip the current session and move to the next one immediately.
+    /// Skip the current session — does not count as completed.
     pub fn skip(&mut self) {
-        // If paused, resume first so `advance` sees the real session type.
         if self.session.is_paused() {
             self.resume();
         }
-        self.advance();
+        self.advance(false);
+    }
+
+    /// Remove the last naturally-completed Focus session from stats.
+    /// Does not change which session is currently active.
+    pub fn undo_last_session(&mut self) {
+        if self.total_focus_sessions > 0 {
+            self.total_focus_sessions -= 1;
+        }
+        if self.current_streak > 0 {
+            self.current_streak -= 1;
+        }
     }
 }
 
@@ -148,25 +180,30 @@ pub enum TimerCommand {
     Pause,
     Resume,
     Skip,
+    /// Remove the last completed session from stats without changing session state.
+    UndoLast,
     Quit,
 }
 
 /// Events sent from the timer thread → UI thread.
 #[derive(Debug, Clone)]
 pub enum TimerEvent {
-    /// Fired every second with the current snapshot.
+    /// Fired every second with a full state snapshot.
     Tick {
         session: SessionState,
         remaining_secs: u64,
         focus_sessions_completed: u32,
         total_focus_sessions: u32,
+        skipped_sessions: u32,
+        current_streak: u32,
+        longest_streak: u32,
     },
-    /// The current session expired and we transitioned to a new one.
+    /// The active session changed (natural expiry or skip).
     SessionChanged(SessionState),
 }
 
 // ---------------------------------------------------------------------------
-// Timer handle (returned to the caller / UI thread)
+// Timer handle
 // ---------------------------------------------------------------------------
 
 /// Returned by [`TimerHandle::start`]. The UI thread holds this to communicate
@@ -198,7 +235,6 @@ impl TimerHandle {
 // Background timer loop
 // ---------------------------------------------------------------------------
 
-/// Runs on its own thread. Ticks every second and processes commands.
 fn timer_loop(
     state: Arc<Mutex<TimerState>>,
     cmd_rx: mpsc::Receiver<TimerCommand>,
@@ -208,7 +244,7 @@ fn timer_loop(
     let mut last_tick = Instant::now();
 
     loop {
-        // Drain all pending commands before doing anything else.
+        // Drain all pending commands before ticking.
         loop {
             match cmd_rx.try_recv() {
                 Ok(TimerCommand::Pause) => {
@@ -225,19 +261,21 @@ fn timer_loop(
                     };
                     let _ = event_tx.send(TimerEvent::SessionChanged(new_session));
                 }
+                Ok(TimerCommand::UndoLast) => {
+                    state.lock().unwrap().undo_last_session();
+                }
                 Ok(TimerCommand::Quit) | Err(mpsc::TryRecvError::Disconnected) => return,
                 Err(mpsc::TryRecvError::Empty) => break,
             }
         }
 
-        // Sleep the remainder of the 1-second tick interval.
         let elapsed = last_tick.elapsed();
         if elapsed < tick_interval {
             thread::sleep(tick_interval - elapsed);
         }
         last_tick = Instant::now();
 
-        // Tick: decrement remaining_secs (only if not paused).
+        // Decrement the clock (only if running).
         let session_expired = {
             let mut s = state.lock().unwrap();
             if !s.session.is_paused() {
@@ -250,17 +288,17 @@ fn timer_loop(
             }
         };
 
-        // If this tick caused the session to expire, advance to the next one.
+        // Natural expiry — advance with completed = true.
         if session_expired {
             let new_session = {
                 let mut s = state.lock().unwrap();
-                s.advance();
+                s.advance(true);
                 s.session.clone()
             };
             let _ = event_tx.send(TimerEvent::SessionChanged(new_session));
         }
 
-        // Send a tick snapshot regardless.
+        // Always send a tick snapshot.
         let snapshot = {
             let s = state.lock().unwrap();
             TimerEvent::Tick {
@@ -268,10 +306,12 @@ fn timer_loop(
                 remaining_secs: s.remaining_secs,
                 focus_sessions_completed: s.focus_sessions_completed,
                 total_focus_sessions: s.total_focus_sessions,
+                skipped_sessions: s.skipped_sessions,
+                current_streak: s.current_streak,
+                longest_streak: s.longest_streak,
             }
         };
         if event_tx.send(snapshot).is_err() {
-            // UI thread has dropped the receiver; exit cleanly.
             return;
         }
     }
@@ -285,7 +325,6 @@ fn timer_loop(
 mod tests {
     use super::*;
 
-    // Helper: build a fresh TimerState for testing without spawning threads.
     fn fresh() -> TimerState {
         TimerState::new()
     }
@@ -300,44 +339,35 @@ mod tests {
         assert_eq!(s.focus_sessions_completed, 0);
     }
 
-    // --- Focus → ShortBreak (first 3 times) ---
+    // --- Transitions ---
 
     #[test]
     fn focus_advances_to_short_break_for_first_three_sessions() {
         for i in 1..SESSIONS_BEFORE_LONG_BREAK {
             let mut s = fresh();
-            // Simulate completing `i` focus sessions without hitting the long break.
             s.focus_sessions_completed = i - 1;
-            s.advance(); // complete one more focus session
-            assert_eq!(
-                s.session,
-                SessionState::ShortBreak,
-                "session {i}: expected ShortBreak"
-            );
+            s.advance(true);
+            assert_eq!(s.session, SessionState::ShortBreak, "session {i}");
             assert_eq!(s.remaining_secs, SHORT_BREAK_SECS);
         }
     }
-
-    // --- Focus → LongBreak after 4th session ---
 
     #[test]
     fn fourth_focus_session_triggers_long_break() {
         let mut s = fresh();
         s.focus_sessions_completed = SESSIONS_BEFORE_LONG_BREAK - 1;
-        s.advance();
+        s.advance(true);
         assert_eq!(s.session, SessionState::LongBreak);
         assert_eq!(s.remaining_secs, LONG_BREAK_SECS);
-        assert_eq!(s.focus_sessions_completed, 0, "counter should reset after long break");
+        assert_eq!(s.focus_sessions_completed, 0);
     }
-
-    // --- Break → Focus ---
 
     #[test]
     fn short_break_advances_to_focus() {
         let mut s = fresh();
         s.session = SessionState::ShortBreak;
         s.remaining_secs = SHORT_BREAK_SECS;
-        s.advance();
+        s.advance(true);
         assert_eq!(s.session, SessionState::Focus);
         assert_eq!(s.remaining_secs, FOCUS_SECS);
     }
@@ -347,29 +377,24 @@ mod tests {
         let mut s = fresh();
         s.session = SessionState::LongBreak;
         s.remaining_secs = LONG_BREAK_SECS;
-        s.advance();
+        s.advance(true);
         assert_eq!(s.session, SessionState::Focus);
         assert_eq!(s.remaining_secs, FOCUS_SECS);
     }
 
-    // --- Full 4-session cycle ---
-
     #[test]
     fn full_four_session_cycle() {
         let mut s = fresh();
-        // 3 focus → short break cycles
         for _ in 0..3 {
             assert_eq!(s.session, SessionState::Focus);
-            s.advance(); // focus completes
+            s.advance(true);
             assert_eq!(s.session, SessionState::ShortBreak);
-            s.advance(); // short break completes
+            s.advance(true);
         }
-        // 4th focus → long break
         assert_eq!(s.session, SessionState::Focus);
-        s.advance();
+        s.advance(true);
         assert_eq!(s.session, SessionState::LongBreak);
-        s.advance(); // long break completes
-        // Back to focus, cycle counter reset
+        s.advance(true);
         assert_eq!(s.session, SessionState::Focus);
         assert_eq!(s.focus_sessions_completed, 0);
     }
@@ -402,14 +427,14 @@ mod tests {
     fn double_pause_is_noop() {
         let mut s = fresh();
         s.pause();
-        s.pause(); // second pause should not double-wrap
+        s.pause();
         assert_eq!(s.session, SessionState::Paused(Box::new(SessionState::Focus)));
     }
 
     #[test]
     fn resume_on_running_timer_is_noop() {
         let mut s = fresh();
-        s.resume(); // should not panic or change state
+        s.resume();
         assert_eq!(s.session, SessionState::Focus);
     }
 
@@ -426,19 +451,111 @@ mod tests {
     fn skip_while_paused_advances_correctly() {
         let mut s = fresh();
         s.pause();
-        s.skip(); // should unpause then advance
+        s.skip();
         assert_eq!(s.session, SessionState::ShortBreak);
     }
 
-    // --- Total session counter ---
+    // --- Skip does NOT count as a completed session ---
+
+    #[test]
+    fn skip_does_not_increment_total_focus_sessions() {
+        let mut s = fresh();
+        s.skip();
+        assert_eq!(s.total_focus_sessions, 0);
+    }
+
+    #[test]
+    fn skip_increments_skipped_sessions() {
+        let mut s = fresh();
+        s.skip();
+        assert_eq!(s.skipped_sessions, 1);
+    }
+
+    #[test]
+    fn natural_completion_does_not_increment_skipped_sessions() {
+        let mut s = fresh();
+        s.advance(true);
+        assert_eq!(s.skipped_sessions, 0);
+    }
+
+    // --- Streak ---
+
+    #[test]
+    fn streak_increments_on_natural_completion() {
+        let mut s = fresh();
+        s.advance(true);
+        assert_eq!(s.current_streak, 1);
+        s.advance(true); // break → focus
+        s.advance(true); // second focus
+        assert_eq!(s.current_streak, 2);
+    }
+
+    #[test]
+    fn streak_resets_to_zero_on_skip() {
+        let mut s = fresh();
+        s.advance(true); // focus 1 done
+        s.advance(true); // break done
+        assert_eq!(s.current_streak, 1);
+        s.skip(); // skip focus 2
+        assert_eq!(s.current_streak, 0);
+    }
+
+    #[test]
+    fn longest_streak_tracks_best_run() {
+        let mut s = fresh();
+        // Complete 2 sessions then skip — longest should be 2.
+        s.advance(true); s.advance(true); // focus 1, break
+        s.advance(true); s.advance(true); // focus 2, break
+        assert_eq!(s.longest_streak, 2);
+        s.skip();
+        assert_eq!(s.current_streak, 0);
+        assert_eq!(s.longest_streak, 2); // best still held
+    }
+
+    // --- Undo ---
+
+    #[test]
+    fn undo_decrements_total_focus_sessions() {
+        let mut s = fresh();
+        s.advance(true);
+        assert_eq!(s.total_focus_sessions, 1);
+        s.undo_last_session();
+        assert_eq!(s.total_focus_sessions, 0);
+    }
+
+    #[test]
+    fn undo_decrements_current_streak() {
+        let mut s = fresh();
+        s.advance(true);
+        assert_eq!(s.current_streak, 1);
+        s.undo_last_session();
+        assert_eq!(s.current_streak, 0);
+    }
+
+    #[test]
+    fn undo_on_zero_is_noop() {
+        let mut s = fresh();
+        s.undo_last_session(); // should not underflow
+        assert_eq!(s.total_focus_sessions, 0);
+        assert_eq!(s.current_streak, 0);
+    }
+
+    #[test]
+    fn undo_does_not_change_session_state() {
+        let mut s = fresh();
+        s.advance(true); // now in ShortBreak
+        s.undo_last_session();
+        assert_eq!(s.session, SessionState::ShortBreak); // still in break
+    }
+
+    // --- Counters ---
 
     #[test]
     fn total_focus_sessions_increments_correctly() {
         let mut s = fresh();
-        // Complete a full 4-session cycle
         for _ in 0..SESSIONS_BEFORE_LONG_BREAK {
-            s.advance(); // focus → break
-            s.advance(); // break → focus (or break → focus on 4th)
+            s.advance(true);
+            s.advance(true);
         }
         assert_eq!(s.total_focus_sessions, SESSIONS_BEFORE_LONG_BREAK);
     }
@@ -450,7 +567,6 @@ mod tests {
         assert_eq!(SessionState::Focus.duration_secs(), FOCUS_SECS);
         assert_eq!(SessionState::ShortBreak.duration_secs(), SHORT_BREAK_SECS);
         assert_eq!(SessionState::LongBreak.duration_secs(), LONG_BREAK_SECS);
-        // Paused delegates to inner
         assert_eq!(
             SessionState::Paused(Box::new(SessionState::Focus)).duration_secs(),
             FOCUS_SECS

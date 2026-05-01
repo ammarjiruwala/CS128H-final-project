@@ -136,7 +136,7 @@ fn render_tasks(f: &mut Frame, area: ratatui::layout::Rect, state: &AppState) {
 fn render_stats(f: &mut Frame, area: ratatui::layout::Rect, state: &AppState) {
     let block = Block::default()
         .title(Span::styled(" Stats ", Style::default().add_modifier(Modifier::BOLD)))
-        .title_bottom(Span::styled(" [ scroll ↑  ] scroll ↓ ", Style::default().fg(Color::DarkGray)))
+        .title_bottom(Span::styled(" [ ↑  ] ↓ ", Style::default().fg(Color::DarkGray)))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::DarkGray));
 
@@ -153,23 +153,21 @@ fn render_stats(f: &mut Frame, area: ratatui::layout::Rect, state: &AppState) {
     let yel  = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
     let grn  = Style::default().fg(Color::Green).add_modifier(Modifier::BOLD);
 
-    let text = Text::from(vec![
-        Line::from(""),
-        Line::from(vec![Span::styled("Completed  : ", dim), Span::styled(state.total_focus_sessions.to_string(), cyan)]),
-        Line::from(vec![Span::styled("Skipped    : ", dim), Span::styled(state.skipped_sessions.to_string(), red)]),
-        Line::from(vec![Span::styled("Completion : ", dim), Span::styled(completion_str, yel)]),
-        Line::from(vec![
+    // Using List + ListState offset so scrolling works like the task list.
+    let items = vec![
+        ListItem::new(Line::from(vec![Span::styled("Completed  : ", dim), Span::styled(state.total_focus_sessions.to_string(), cyan)])),
+        ListItem::new(Line::from(vec![Span::styled("Skipped    : ", dim), Span::styled(state.skipped_sessions.to_string(), red)])),
+        ListItem::new(Line::from(vec![Span::styled("Completion : ", dim), Span::styled(completion_str, yel)])),
+        ListItem::new(Line::from(vec![
             Span::styled("Streak     : ", dim),
             Span::styled(format!("{} (best {})", state.current_streak, state.longest_streak), grn),
-        ]),
-        Line::from(vec![Span::styled("Focus time : ", dim), Span::styled(format!("{}m", focus_mins), cyan)]),
-        Line::from(vec![Span::styled("Tasks done : ", dim), Span::styled(tasks_done.to_string(), cyan)]),
-    ]);
+        ])),
+        ListItem::new(Line::from(vec![Span::styled("Focus time : ", dim), Span::styled(format!("{}m", focus_mins), cyan)])),
+        ListItem::new(Line::from(vec![Span::styled("Tasks done : ", dim), Span::styled(tasks_done.to_string(), cyan)])),
+    ];
 
-    f.render_widget(
-        Paragraph::new(text).block(block).scroll((state.stats_scroll, 0)),
-        area,
-    );
+    let mut list_state = ListState::default().with_offset(state.stats_scroll as usize);
+    f.render_stateful_widget(List::new(items).block(block), area, &mut list_state);
 }
 
 fn render_help(f: &mut Frame, area: ratatui::layout::Rect, state: &AppState) {

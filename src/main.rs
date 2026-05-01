@@ -17,6 +17,7 @@ use crossterm::{
 use ratatui::{Terminal, backend::CrosstermBackend};
 
 use app::AppState;
+use persistence::{load_tasks, load_history};
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -34,6 +35,16 @@ fn main() {
     let mut terminal = Terminal::new(backend).expect("failed to create terminal");
 
     let mut app = AppState::new();
+
+    // Load persisted state from previous runs.
+    if let Ok(tasks) = load_tasks() {
+        if !tasks.is_empty() {
+            app.tasks = crate::tasks::TaskQueue::from_tasks(tasks);
+        }
+    }
+    if let Ok(history) = load_history() {
+        app.session_history = history;
+    }
 
     loop {
         // Pull in any timer ticks that arrived since the last iteration.
@@ -90,4 +101,8 @@ fn main() {
     disable_raw_mode().expect("failed to disable raw mode");
     execute!(terminal.backend_mut(), LeaveAlternateScreen)
         .expect("failed to leave alternate screen");
+
+    if let Err(e) = app.save() {
+        eprintln!("Warning: could not save data: {}", e);
+    }
 }

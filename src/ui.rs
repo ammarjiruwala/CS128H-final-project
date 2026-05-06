@@ -7,24 +7,8 @@ use ratatui::{
 };
 
 use crate::app::{AppState, InputMode};
-use crate::stats;
 use crate::tasks::TaskStatus;
 use crate::timer::{SessionState, SESSIONS_BEFORE_LONG_BREAK};
-
-// ---------------------------------------------------------------------------
-// Heatmap colour palette (GitHub-style green gradient)
-// ---------------------------------------------------------------------------
-
-fn heatmap_cell(focus_secs: u64) -> Span<'static> {
-    // Thresholds: 0 | <15m | <30m | <50m | 50m+
-    match focus_secs {
-        0           => Span::styled("▪", Style::default().fg(Color::Rgb(30, 35, 40))),
-        1..=899     => Span::styled("▪", Style::default().fg(Color::Rgb(14, 68, 41))),
-        900..=1799  => Span::styled("▪", Style::default().fg(Color::Rgb(0,  109, 50))),
-        1800..=2999 => Span::styled("▪", Style::default().fg(Color::Rgb(38, 166, 65))),
-        _           => Span::styled("▪", Style::default().fg(Color::Rgb(57, 211, 83))),
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Top-level render
@@ -168,110 +152,17 @@ fn render_tasks(f: &mut Frame, area: ratatui::layout::Rect, state: &AppState) {
 fn render_stats(f: &mut Frame, area: ratatui::layout::Rect, state: &AppState) {
     let block = Block::default()
         .title(Span::styled(" Stats ", Style::default().add_modifier(Modifier::BOLD)))
-        .title_bottom(Span::styled(
-            " [ ↑  ] ↓ ",
-            Style::default().fg(Color::DarkGray),
-        ))
+        .title_bottom(Span::styled(" [ ↑  ] ↓ ", Style::default().fg(Color::DarkGray)))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::DarkGray));
 
-    // How many heatmap weeks fit in the panel (each cell = 1 char + 1 space, plus "M " label).
-    let inner_width = area.width.saturating_sub(4) as usize; // 2 borders + 2 label chars
-    let weeks       = (inner_width / 2).clamp(6, 16);
+    let dim  = Style::default().fg(Color::DarkGray);
+    let cyan = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
+    let red  = Style::default().fg(Color::Red).add_modifier(Modifier::BOLD);
+    let yel  = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
+    let grn  = Style::default().fg(Color::Green).add_modifier(Modifier::BOLD);
 
-    let all     = stats::compute_all_time_stats(&state.session_history);
-    let heatmap = stats::build_heatmap(&state.session_history, weeks);
-
-    let dim     = Style::default().fg(Color::DarkGray);
-    let bold    = Style::default().add_modifier(Modifier::BOLD);
-    let cyan    = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
-    let red     = Style::default().fg(Color::Red).add_modifier(Modifier::BOLD);
-    let yel     = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
-    let grn     = Style::default().fg(Color::Green).add_modifier(Modifier::BOLD);
-    let section = Style::default().fg(Color::DarkGray);
-
-    let day_labels = ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"];
-
-    // ── Heatmap ──────────────────────────────────────────────────────────────
-    let mut items: Vec<ListItem> = Vec::new();
-
-    items.push(ListItem::new(Line::from(Span::styled(
-        " Activity",
-        Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
-    ))));
-
-    // Legend row
-    let legend = Line::from(vec![
-        Span::styled("   ", dim),
-        Span::styled("▪", Style::default().fg(Color::Rgb(30, 35, 40))),
-        Span::styled(" none  ", dim),
-        Span::styled("▪", Style::default().fg(Color::Rgb(14, 68, 41))),
-        Span::styled("▪", Style::default().fg(Color::Rgb(0, 109, 50))),
-        Span::styled("▪", Style::default().fg(Color::Rgb(38, 166, 65))),
-        Span::styled("▪", Style::default().fg(Color::Rgb(57, 211, 83))),
-        Span::styled(" more", dim),
-    ]);
-    items.push(ListItem::new(legend));
-
-    for (day_idx, row) in heatmap.iter().enumerate() {
-        let mut spans = vec![
-            Span::styled(
-                format!("{} ", day_labels[day_idx]),
-                Style::default().fg(Color::DarkGray),
-            ),
-        ];
-        for &secs in row {
-            spans.push(heatmap_cell(secs));
-            spans.push(Span::raw(" "));
-        }
-        items.push(ListItem::new(Line::from(spans)));
-    }
-
-    // ── Separator ─────────────────────────────────────────────────────────────
-    items.push(ListItem::new(Line::from(Span::styled(
-        "─".repeat(inner_width + 2),
-        section,
-    ))));
-
-    // ── All-time summary ──────────────────────────────────────────────────────
-    items.push(ListItem::new(Line::from(Span::styled(" All time", bold))));
-
-    let at_mins = all.total_focus_secs / 60;
-    let at_time = if at_mins >= 60 {
-        format!("{}h {}m", at_mins / 60, at_mins % 60)
-    } else {
-        format!("{}m", at_mins)
-    };
-    let at_total = all.total_completed + all.total_skipped;
-    let at_rate  = if at_total > 0 { all.total_completed * 100 / at_total } else { 0 };
-
-    items.push(ListItem::new(Line::from(vec![
-        Span::styled(" Done : ", dim),
-        Span::styled(all.total_completed.to_string(), cyan),
-        Span::styled("  Skip : ", dim),
-        Span::styled(all.total_skipped.to_string(), red),
-    ])));
-    items.push(ListItem::new(Line::from(vec![
-        Span::styled(" Rate : ", dim),
-        Span::styled(format!("{}%", at_rate), yel),
-        Span::styled("  Best : ", dim),
-        Span::styled(format!("{} 🔥", all.best_streak), grn),
-    ])));
-    items.push(ListItem::new(Line::from(vec![
-        Span::styled(" Time : ", dim),
-        Span::styled(at_time, cyan),
-    ])));
-
-    // ── Separator ─────────────────────────────────────────────────────────────
-    items.push(ListItem::new(Line::from(Span::styled(
-        "─".repeat(inner_width + 2),
-        section,
-    ))));
-
-    // ── This session ──────────────────────────────────────────────────────────
-    items.push(ListItem::new(Line::from(Span::styled(" This session", bold))));
-
-    let sess_mins      = state.total_focus_secs / 60;
+    let focus_mins     = state.total_focus_secs / 60;
     let completion_str = match state.completion_rate() {
         Some(r) => format!("{}%", r),
         None    => "—".to_string(),
@@ -280,29 +171,39 @@ fn render_stats(f: &mut Frame, area: ratatui::layout::Rect, state: &AppState) {
         .filter(|t| t.status == TaskStatus::Done)
         .count();
 
-    items.push(ListItem::new(Line::from(vec![
-        Span::styled(" Done : ", dim),
-        Span::styled(state.total_focus_sessions.to_string(), cyan),
-        Span::styled("  Skip : ", dim),
-        Span::styled(state.skipped_sessions.to_string(), red),
-    ])));
-    items.push(ListItem::new(Line::from(vec![
-        Span::styled(" Rate : ", dim),
-        Span::styled(completion_str, yel),
-        Span::styled("  Tasks: ", dim),
-        Span::styled(tasks_done.to_string(), cyan),
-    ])));
-    items.push(ListItem::new(Line::from(vec![
-        Span::styled(" Streak: ", dim),
-        Span::styled(
-            format!("{} (best {})", state.current_streak, state.longest_streak),
-            grn,
-        ),
-    ])));
-    items.push(ListItem::new(Line::from(vec![
-        Span::styled(" Time : ", dim),
-        Span::styled(format!("{}m", sess_mins), cyan),
-    ])));
+    let items = vec![
+        ListItem::new(Line::from(vec![
+            Span::styled("Completed  : ", dim),
+            Span::styled(state.total_focus_sessions.to_string(), cyan),
+        ])),
+        ListItem::new(Line::from(vec![
+            Span::styled("Skipped    : ", dim),
+            Span::styled(state.skipped_sessions.to_string(), red),
+        ])),
+        ListItem::new(Line::from(vec![
+            Span::styled("Completion : ", dim),
+            Span::styled(completion_str, yel),
+        ])),
+        ListItem::new(Line::from(vec![
+            Span::styled("Streak     : ", dim),
+            Span::styled(
+                format!("{} (best {})", state.current_streak, state.longest_streak),
+                grn,
+            ),
+        ])),
+        ListItem::new(Line::from(vec![
+            Span::styled("Focus time : ", dim),
+            Span::styled(format!("{}m", focus_mins), cyan),
+        ])),
+        ListItem::new(Line::from(vec![
+            Span::styled("Tasks done : ", dim),
+            Span::styled(tasks_done.to_string(), cyan),
+        ])),
+        ListItem::new(Line::from(Span::styled(
+            "  (run --stats for history)",
+            Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM),
+        ))),
+    ];
 
     let mut list_state = ListState::default().with_offset(state.stats_scroll as usize);
     f.render_stateful_widget(List::new(items).block(block), area, &mut list_state);

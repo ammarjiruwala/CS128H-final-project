@@ -1,6 +1,9 @@
 use chrono::{Datelike, Duration, Local, NaiveDate, NaiveDateTime};
+use crossterm::style::{Color, Print, ResetColor, SetForegroundColor};
+use crossterm::ExecutableCommand;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::io::{stdout, Write};
 
 /// One completed or skipped session recorded to disk.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -97,37 +100,80 @@ pub fn build_heatmap(history: &[SessionRecord], weeks: usize) -> Vec<Vec<u64>> {
 }
 
 // ---------------------------------------------------------------------------
-// --stats CLI output
+// --stats CLI output (with coloured heatmap)
 // ---------------------------------------------------------------------------
+
+fn heatmap_color(focus_secs: u64) -> Color {
+    match focus_secs {
+        0           => Color::Rgb { r: 30,  g: 35,  b: 40  }, // empty
+        1..=899     => Color::Rgb { r: 14,  g: 68,  b: 41  }, // < 15 min
+        900..=1799  => Color::Rgb { r: 0,   g: 109, b: 50  }, // 15–30 min
+        1800..=2999 => Color::Rgb { r: 38,  g: 166, b: 65  }, // 30–50 min
+        _           => Color::Rgb { r: 57,  g: 211, b: 83  }, // 50 min+
+    }
+}
 
 pub fn print_stats() {
     let history = crate::persistence::load_history().unwrap_or_default();
+    let mut out  = stdout();
+
+    println!();
 
     if history.is_empty() {
-        println!();
         println!("  No session history yet. Run the app to start tracking!");
         println!();
         return;
     }
 
-    let s = compute_all_time_stats(&history);
-    let focus_mins = s.total_focus_secs / 60;
-    let total      = s.total_completed + s.total_skipped;
-    let rate       = if total > 0 { s.total_completed * 100 / total } else { 0 };
+    let s      = compute_all_time_stats(&history);
+    let total  = s.total_completed + s.total_skipped;
+    let rate   = if total > 0 { s.total_completed * 100 / total } else { 0 };
+    let at_mins = s.total_focus_secs / 60;
+    let at_time = if at_mins >= 60 {
+        format!("{}h {}m", at_mins / 60, at_mins % 60)
+    } else {
+        format!("{}m", at_mins)
+    };
 
-    println!();
+    // ── All-time summary ──────────────────────────────────────────────────────
     println!("  Terminal Pomodoro — All-Time Stats");
-    println!("  {}", "─".repeat(36));
+    println!("  {}", "─".repeat(38));
     println!("  Completed sessions : {}", s.total_completed);
     println!("  Skipped sessions   : {}", s.total_skipped);
     println!("  Completion rate    : {}%", rate);
-    println!("  Total focus time   : {}m{}", focus_mins,
-        if focus_mins >= 60 { format!("  ({:.1}h)", focus_mins as f32 / 60.0) }
-        else { String::new() }
-    );
+    println!("  Total focus time   : {}", at_time);
     println!("  Best streak        : {} sessions", s.best_streak);
     println!();
 
+    // ── Activity heatmap (14 weeks) ───────────────────────────────────────────
+    println!("  Activity — last 14 weeks");
+    println!();
+
+    let heatmap    = build_heatmap(&history, 14);
+    let day_labels = ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"];
+
+    for (day_idx, row) in heatmap.iter().enumerate() {
+        print!("  {} ", day_labels[day_idx]);
+        for &secs in row {
+            let _ = out.execute(SetForegroundColor(heatmap_color(secs)));
+            let _ = out.execute(Print("▪ "));
+        }
+        let _ = out.execute(ResetColor);
+        println!();
+    }
+
+    // Legend
+    println!();
+    print!("  Less ");
+    for &secs in &[0u64, 500, 1200, 2000, 3200] {
+        let _ = out.execute(SetForegroundColor(heatmap_color(secs)));
+        let _ = out.execute(Print("▪ "));
+    }
+    let _ = out.execute(ResetColor);
+    println!("More");
+    println!();
+
+    // ── Recent sessions ───────────────────────────────────────────────────────
     let recent: Vec<&SessionRecord> = history.iter().rev().take(10).collect();
     if !recent.is_empty() {
         println!("  Recent sessions (latest first):");
@@ -148,4 +194,6 @@ pub fn print_stats() {
         }
         println!();
     }
+
+    let _ = out.flush();
 }

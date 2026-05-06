@@ -30,7 +30,7 @@ That's it. Cargo will download all dependencies and build the project on first r
 | `[` / `]` | Scroll stats panel up / down |
 | `q` | Quit and save |
 
-## Optional: view session history
+## View session history
 
 ```bash
 cargo run -- --stats

@@ -37,7 +37,7 @@ pub enum SessionState {
 }
 
 impl SessionState {
-    /// Returns the total duration (in seconds) for this state.
+    #[allow(dead_code)]
     pub fn duration_secs(&self) -> u64 {
         match self {
             SessionState::Focus => FOCUS_SECS,
@@ -222,7 +222,6 @@ pub enum TimerEvent {
 pub struct TimerHandle {
     pub cmd_tx: mpsc::Sender<TimerCommand>,
     pub event_rx: mpsc::Receiver<TimerEvent>,
-    pub state: Arc<Mutex<TimerState>>,
 }
 
 impl TimerHandle {
@@ -233,13 +232,12 @@ impl TimerHandle {
         let (event_tx, event_rx) = mpsc::channel::<TimerEvent>();
 
         let state = Arc::new(Mutex::new(TimerState::new()));
-        let state_clone = Arc::clone(&state);
 
         thread::spawn(move || {
-            timer_loop(state_clone, cmd_rx, event_tx);
+            timer_loop(state, cmd_rx, event_tx);
         });
 
-        let handle = TimerHandle { cmd_tx, event_rx, state };
+        let handle = TimerHandle { cmd_tx, event_rx };
         let _ = handle.cmd_tx.send(TimerCommand::Pause);
         handle
     }

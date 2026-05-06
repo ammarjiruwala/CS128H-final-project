@@ -46,6 +46,7 @@ impl TaskQueue {
         self.next_id += 1;
     }
 
+    #[allow(dead_code)]
     pub fn complete_task(&mut self, id: u32) {
         if let Some(task) = self.tasks.iter_mut().find(|t| t.id == id) {
             task.status = TaskStatus::Done;

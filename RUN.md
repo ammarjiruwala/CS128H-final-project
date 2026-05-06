@@ -1,21 +1,12 @@
 # RUN.md — Terminal Pomodoro
-
-## Requirements
-
-- [Rust](https://www.rust-lang.org/tools/install) (edition 2024, tested on rustc 1.93+)
-- A terminal emulator that supports 256 colours (most modern terminals do: iTerm2, Windows Terminal, GNOME Terminal, etc.)
-
 ## Steps
-
 ```bash
 git clone https://github.com/ammarjiruwala/CS128H-final-project.git
 cd CS128H-final-project
 cargo run
 ```
 
-That's it. Cargo will download all dependencies and build the project on first run.
-
-## Keybindings
+## Keybindings for the Terminal Pomodoro
 
 | Key | Action |
 |-----|--------|
@@ -35,5 +26,3 @@ That's it. Cargo will download all dependencies and build the project on first r
 ```bash
 cargo run -- --stats
 ```
-
-Prints an all-time summary with a GitHub-style activity heatmap and your last 10 sessions. Data persists in `pomodoro_tasks.json` and `pomodoro_history.json` in the directory where you run the app.
